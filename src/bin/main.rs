@@ -6,6 +6,8 @@
     holding buffers for the duration of a data transfer."
 )]
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_net::{
@@ -22,7 +24,7 @@ use esp_radio::wifi::{
     ClientConfig, ModeConfig, ScanConfig, WifiController, WifiDevice, WifiEvent, WifiStaState,
 };
 use reqwless::client::{HttpClient, TlsConfig};
-
+use utc_dt::date::UTCDate;
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
@@ -47,6 +49,84 @@ macro_rules! mk_static {
 
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
+
+#[derive(Copy, Clone, Debug)]
+#[repr(u8)]
+enum Event {
+    Verpackungs,
+    Bio,
+    Papier,
+    Restmüll,
+    Laubsack,
+    Weihnachtsbäume,
+}
+#[derive(Debug)]
+struct IcsEvent {
+    dtstart: UTCDate,
+    event_type: Event,
+}
+
+fn parse_yyyymmdd(s: &str) -> Result<UTCDate, &'static str> {
+    if s.len() != 8 {
+        return Err("Expected 8 characters (YYYYMMDD)");
+    }
+
+    let year = s[0..4].parse::<u64>().map_err(|_| "Invalid year")?;
+    let month = s[4..6].parse::<u8>().map_err(|_| "Invalid month")?;
+    let day = s[6..8].parse::<u8>().map_err(|_| "Invalid day")?;
+
+    UTCDate::try_from_components(year, month, day).map_err(|_| "Invalid date")
+}
+
+fn extract_ics_event(ics_document: String) -> Vec<IcsEvent> {
+    let mut ics_events: Vec<IcsEvent> = Vec::new();
+    let mut event_type: Option<Event> = None;
+    let mut start_ts: Option<UTCDate> = None;
+
+    for line_str in ics_document.lines() {
+        let line = line_str.trim_end();
+
+        if line.starts_with("DTSTART;") {
+            assert!(line.starts_with("DTSTART;TZID=Europe/Berlin;VALUE=DATE:"),);
+            assert!(line.len() == 46, "Line length: {}", line.len());
+            start_ts = Some(parse_yyyymmdd(&line[38..]).unwrap());
+        } else if line.starts_with("SUMMARY:") {
+            let event_name = line[8..].trim();
+            match event_name {
+                "Abfuhr gelbe Wertstofftonne/-sack" => {
+                    event_type = Some(Event::Verpackungs);
+                }
+                "Abfuhr grüne Biotonne" => {
+                    event_type = Some(Event::Bio);
+                }
+                "Abfuhr blaue Papiertonne" => {
+                    event_type = Some(Event::Papier);
+                }
+                "Abfuhr schwarze Restmülltonne" => {
+                    event_type = Some(Event::Restmüll);
+                }
+                "Abfuhr Laubsäcke" => {
+                    event_type = Some(Event::Laubsack);
+                }
+                "Abfuhr Weihnachtsbäume" => {
+                    event_type = Some(Event::Weihnachtsbäume);
+                }
+                _ => {
+                    println!("Unknown Event: {}", line); // Placeholder
+                }
+            }
+        } else if line == "END:VEVENT" {
+            assert!(start_ts.is_some());
+            assert!(event_type.is_some());
+            //println!("{:?} @ {:?}", event_type.unwrap(), start_ts.unwrap());
+            ics_events.push(IcsEvent {
+                dtstart: start_ts.unwrap(),
+                event_type: event_type.unwrap(),
+            });
+        }
+    }
+    return ics_events;
+}
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -94,8 +174,9 @@ async fn main(spawner: Spawner) -> ! {
 
     wait_for_connection(stack).await;
 
-    access_website(stack, tls_seed).await;
-
+    let s: String = access_website(stack, tls_seed).await;
+    let events = extract_ics_event(s);
+    info!("Extracted {} events", events.len());
     loop {}
 }
 
@@ -169,7 +250,7 @@ async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     runner.run().await
 }
 
-async fn access_website(stack: Stack<'_>, tls_seed: u64) {
+async fn access_website(stack: Stack<'_>, tls_seed: u64) -> String {
     let mut rx_buffer = [0; RX_BUFFER_SIZE];
     let mut tx_buffer = [0; 4096];
     let dns = DnsSocket::new(stack);
@@ -198,5 +279,7 @@ async fn access_website(stack: Stack<'_>, tls_seed: u64) {
     let res = response.body().read_to_end().await.unwrap();
 
     let content = core::str::from_utf8(res).unwrap();
-    println!("{}", content);
+    let mut s = String::new();
+    s.push_str(content);
+    return s;
 }
