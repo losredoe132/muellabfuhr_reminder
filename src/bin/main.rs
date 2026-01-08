@@ -6,10 +6,13 @@
     holding buffers for the duration of a data transfer."
 )]
 
+use embassy_net::{IpEndpoint, Ipv4Address};
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use defmt::info;
 use embassy_executor::Spawner;
+use embassy_net::udp::{UdpMetadata, UdpSocket};
 use embassy_net::{
     DhcpConfig, Runner, Stack, StackResources,
     dns::DnsSocket,
@@ -24,11 +27,17 @@ use esp_radio::wifi::{
     ClientConfig, ModeConfig, ScanConfig, WifiController, WifiDevice, WifiEvent, WifiStaState,
 };
 use reqwless::client::{HttpClient, TlsConfig};
+use smoltcp::storage::PacketMetadata;
 use utc_dt::date::UTCDate;
+
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
+
+const NTP_SERVER: Ipv4Address = Ipv4Address::new(129, 6, 15, 28); // time.nist.gov
+const NTP_PORT: u16 = 123;
+const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
 
 static RX_BUFFER_SIZE: usize = 32000;
 extern crate alloc;
@@ -128,6 +137,30 @@ fn extract_ics_event(ics_document: String) -> Vec<IcsEvent> {
     return ics_events;
 }
 
+pub async fn ntp_request(socket: &mut UdpSocket<'_>) -> Result<i64, ()> {
+    let mut request = [0u8; 48];
+    request[0] = 0x23; // LI=0, VN=4, Mode=3 (client)
+
+    let endpoint = IpEndpoint::new(NTP_SERVER.into(), NTP_PORT);
+
+    socket.send_to(&request, endpoint).await.map_err(|_| ())?;
+
+    let mut response = [0u8; 48];
+
+    // Optional timeout
+    Timer::after(Duration::from_secs(5)).await;
+
+    let (_len, _src) = socket.recv_from(&mut response).await.map_err(|_| ())?;
+
+    // Transmit Timestamp starts at byte 40
+    let seconds =
+        u32::from_be_bytes([response[40], response[41], response[42], response[43]]) as u64;
+
+    let unix_time = seconds.checked_sub(NTP_UNIX_OFFSET).ok_or(())?;
+
+    Ok(unix_time as i64)
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.0.0
@@ -173,6 +206,24 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(net_task(runner)).ok();
 
     wait_for_connection(stack).await;
+
+    // How many packets can be buffered
+    const RX_PACKET_COUNT: usize = 1;
+    const TX_PACKET_COUNT: usize = 1;
+
+    // Metadata (packet descriptors)
+    let mut rx_meta = [PacketMetadata::<UdpMetadata>::EMPTY; RX_PACKET_COUNT];
+    let mut tx_meta = [PacketMetadata::<UdpMetadata>::EMPTY; TX_PACKET_COUNT];
+
+    // Payload buffers
+    let mut rx_buf = [0u8; 256];
+    let mut tx_buf = [0u8; 256];
+
+    let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buf, &mut tx_meta, &mut tx_buf);
+    socket.bind(0).unwrap(); // random local port
+
+    let unix_time = ntp_request(&mut socket).await.unwrap();
+    info!("UNIX TIME: {}", unix_time);
 
     let s: String = access_website(stack, tls_seed).await;
     let events = extract_ics_event(s);
