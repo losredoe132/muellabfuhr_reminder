@@ -1,0 +1,19 @@
+meta {
+  name: get ics
+  type: http
+  seq: 1
+}
+
+get {
+  url: https://backend.stadtreinigung.hamburg/kalender/abholtermine.ics?hnIds=44353
+  body: none
+  auth: inherit
+}
+
+params:query {
+  hnIds: 44353
+}
+
+settings {
+  encodeUrl: true
+}

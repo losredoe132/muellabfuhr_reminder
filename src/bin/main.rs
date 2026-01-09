@@ -29,6 +29,7 @@ use esp_radio::wifi::{
 use reqwless::client::{HttpClient, TlsConfig};
 use smoltcp::storage::PacketMetadata;
 use utc_dt::date::UTCDate;
+use utc_dt::time::UTCTimestamp;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -137,7 +138,7 @@ fn extract_ics_event(ics_document: String) -> Vec<IcsEvent> {
     return ics_events;
 }
 
-pub async fn ntp_request(socket: &mut UdpSocket<'_>) -> Result<i64, ()> {
+pub async fn ntp_request(socket: &mut UdpSocket<'_>) -> Result<u64, ()> {
     let mut request = [0u8; 48];
     request[0] = 0x23; // LI=0, VN=4, Mode=3 (client)
 
@@ -158,7 +159,7 @@ pub async fn ntp_request(socket: &mut UdpSocket<'_>) -> Result<i64, ()> {
 
     let unix_time = seconds.checked_sub(NTP_UNIX_OFFSET).ok_or(())?;
 
-    Ok(unix_time as i64)
+    Ok(unix_time as u64)
 }
 
 #[esp_rtos::main]
@@ -223,9 +224,10 @@ async fn main(spawner: Spawner) -> ! {
     socket.bind(0).unwrap(); // random local port
 
     let unix_time = ntp_request(&mut socket).await.unwrap();
-    info!("UNIX TIME: {}", unix_time);
+    info!("Got Unix timestamp: {}", unix_time);
+    let current_time = UTCTimestamp::from_secs(unix_time);
 
-    let s: String = access_website(stack, tls_seed).await;
+    let s: String = get_ics(stack, tls_seed).await;
     let events = extract_ics_event(s);
     info!("Extracted {} events", events.len());
     loop {}
@@ -301,7 +303,7 @@ async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     runner.run().await
 }
 
-async fn access_website(stack: Stack<'_>, tls_seed: u64) -> String {
+async fn get_ics(stack: Stack<'_>, tls_seed: u64) -> String {
     let mut rx_buffer = [0; RX_BUFFER_SIZE];
     let mut tx_buffer = [0; 4096];
     let dns = DnsSocket::new(stack);
@@ -324,6 +326,7 @@ async fn access_website(stack: Stack<'_>, tls_seed: u64) -> String {
         )
         .await
         .unwrap();
+    info!("requesting");
     let response = http_req.send(&mut buffer).await.unwrap();
 
     info!("Got response");
