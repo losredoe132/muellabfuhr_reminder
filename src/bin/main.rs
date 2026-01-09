@@ -28,8 +28,8 @@ use esp_radio::wifi::{
 };
 use reqwless::client::{HttpClient, TlsConfig};
 use smoltcp::storage::PacketMetadata;
+use time::{Date, Month, UtcDateTime};
 use utc_dt::date::UTCDate;
-use utc_dt::time::UTCTimestamp;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -60,7 +60,7 @@ macro_rules! mk_static {
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
 
-#[derive(Copy, Clone, Debug)]
+#[derive(defmt::Format, Copy, Clone, Debug)]
 #[repr(u8)]
 enum Event {
     Verpackungs,
@@ -72,26 +72,28 @@ enum Event {
 }
 #[derive(Debug)]
 struct IcsEvent {
-    dtstart: UTCDate,
+    dtstart: Date,
     event_type: Event,
 }
 
-fn parse_yyyymmdd(s: &str) -> Result<UTCDate, &'static str> {
+fn parse_yyyymmdd(s: &str) -> Result<Date, &'static str> {
     if s.len() != 8 {
         return Err("Expected 8 characters (YYYYMMDD)");
     }
 
-    let year = s[0..4].parse::<u64>().map_err(|_| "Invalid year")?;
-    let month = s[4..6].parse::<u8>().map_err(|_| "Invalid month")?;
+    let year = s[0..4].parse::<i32>().map_err(|_| "Invalid year")?;
+    let month_num = s[4..6].parse::<u8>().map_err(|_| "Invalid month")?;
     let day = s[6..8].parse::<u8>().map_err(|_| "Invalid day")?;
 
-    UTCDate::try_from_components(year, month, day).map_err(|_| "Invalid date")
+    let month = Month::try_from(month_num).expect("month must be in 1..=12");
+
+    Date::from_calendar_date(year, month, day).map_err(|_| "Invalid date")
 }
 
 fn extract_ics_event(ics_document: String) -> Vec<IcsEvent> {
     let mut ics_events: Vec<IcsEvent> = Vec::new();
     let mut event_type: Option<Event> = None;
-    let mut start_ts: Option<UTCDate> = None;
+    let mut start_ts: Option<Date> = None;
 
     for line_str in ics_document.lines() {
         let line = line_str.trim_end();
@@ -138,7 +140,7 @@ fn extract_ics_event(ics_document: String) -> Vec<IcsEvent> {
     return ics_events;
 }
 
-pub async fn ntp_request(socket: &mut UdpSocket<'_>) -> Result<u64, ()> {
+pub async fn ntp_request(socket: &mut UdpSocket<'_>) -> Result<i64, ()> {
     let mut request = [0u8; 48];
     request[0] = 0x23; // LI=0, VN=4, Mode=3 (client)
 
@@ -159,7 +161,7 @@ pub async fn ntp_request(socket: &mut UdpSocket<'_>) -> Result<u64, ()> {
 
     let unix_time = seconds.checked_sub(NTP_UNIX_OFFSET).ok_or(())?;
 
-    Ok(unix_time as u64)
+    Ok(unix_time as i64)
 }
 
 #[esp_rtos::main]
@@ -208,7 +210,6 @@ async fn main(spawner: Spawner) -> ! {
 
     wait_for_connection(stack).await;
 
-    
     let s: String = get_ics(stack, tls_seed).await;
     let events = extract_ics_event(s);
     info!("Extracted {} events", events.len());
@@ -230,8 +231,17 @@ async fn main(spawner: Spawner) -> ! {
 
     let unix_time = ntp_request(&mut socket).await.unwrap();
     info!("Got Unix timestamp: {}", unix_time);
-    let current_time = UTCTimestamp::from_secs(unix_time);
+    let utc_date = UtcDateTime::from_unix_timestamp(unix_time).unwrap().date();
+    info!(
+        "Converted Unix timestamp to Date: {}-{}-{}",
+        utc_date.day() as u16,
+        utc_date.month() as u16,
+        utc_date.year() as u16
+    );
 
+    for event in events {
+        info!("checking {} ", event.event_type);
+    }
 
     loop {}
 }
