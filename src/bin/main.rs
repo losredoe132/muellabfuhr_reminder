@@ -25,11 +25,11 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_println::{self as _, println};
 use esp_radio::wifi::{
     ClientConfig, ModeConfig, ScanConfig, WifiController, WifiDevice, WifiEvent, WifiStaState,
+    event,
 };
 use reqwless::client::{HttpClient, TlsConfig};
 use smoltcp::storage::PacketMetadata;
 use time::{Date, Month, UtcDateTime};
-use utc_dt::date::UTCDate;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -72,8 +72,8 @@ enum Event {
 }
 #[derive(Debug)]
 struct IcsEvent {
-    dtstart: Date,
-    event_type: Event,
+    dtstart: Option<Date>,
+    event_type: Option<Event>,
 }
 
 fn parse_yyyymmdd(s: &str) -> Result<Date, &'static str> {
@@ -132,8 +132,8 @@ fn extract_ics_event(ics_document: String) -> Vec<IcsEvent> {
             assert!(event_type.is_some());
             //println!("{:?} @ {:?}", event_type.unwrap(), start_ts.unwrap());
             ics_events.push(IcsEvent {
-                dtstart: start_ts.unwrap(),
-                event_type: event_type.unwrap(),
+                dtstart: start_ts,
+                event_type: event_type,
             });
         }
     }
@@ -231,16 +231,26 @@ async fn main(spawner: Spawner) -> ! {
 
     let unix_time = ntp_request(&mut socket).await.unwrap();
     info!("Got Unix timestamp: {}", unix_time);
-    let utc_date = UtcDateTime::from_unix_timestamp(unix_time).unwrap().date();
+    let today = UtcDateTime::from_unix_timestamp(unix_time).unwrap().date();
     info!(
         "Converted Unix timestamp to Date: {}-{}-{}",
-        utc_date.day() as u16,
-        utc_date.month() as u16,
-        utc_date.year() as u16
+        today.day() as u16,
+        today.month() as u16,
+        today.year() as u16
     );
 
     for event in events {
-        info!("checking {} ", event.event_type);
+        info!(
+            "checking {} at {}-{}-{} ",
+            event.event_type,
+            event.dtstart.unwrap().day() as u16,
+            event.dtstart.unwrap().month() as u16,
+            event.dtstart.unwrap().year() as u16,
+        );
+
+        if today.next_day().eq(&event.dtstart) {
+            info!("Tomorrow is {}", event.event_type)
+        }
     }
 
     loop {}
