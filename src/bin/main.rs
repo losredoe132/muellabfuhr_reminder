@@ -208,7 +208,12 @@ async fn main(spawner: Spawner) -> ! {
 
     wait_for_connection(stack).await;
 
-    // How many packets can be buffered
+    
+    let s: String = get_ics(stack, tls_seed).await;
+    let events = extract_ics_event(s);
+    info!("Extracted {} events", events.len());
+
+    //How many packets can be buffered
     const RX_PACKET_COUNT: usize = 1;
     const TX_PACKET_COUNT: usize = 1;
 
@@ -227,9 +232,7 @@ async fn main(spawner: Spawner) -> ! {
     info!("Got Unix timestamp: {}", unix_time);
     let current_time = UTCTimestamp::from_secs(unix_time);
 
-    let s: String = get_ics(stack, tls_seed).await;
-    let events = extract_ics_event(s);
-    info!("Extracted {} events", events.len());
+
     loop {}
 }
 
