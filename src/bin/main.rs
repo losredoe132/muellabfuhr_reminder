@@ -25,8 +25,12 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_println::{self as _, println};
 use esp_radio::wifi::{
     ClientConfig, ModeConfig, ScanConfig, WifiController, WifiDevice, WifiEvent, WifiStaState,
-    event,
 };
+
+use esp_hal::{ rmt::Rmt, time::Rate};
+use esp_hal_smartled::SmartLedsAdapter;
+use smart_leds::{SmartLedsWrite as _, brightness, colors::RED};
+
 use reqwless::client::{HttpClient, TlsConfig};
 use smoltcp::storage::PacketMetadata;
 use time::{Date, Month, UtcDateTime};
@@ -177,6 +181,16 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     info!("Embassy initialized!");
+
+    let mut led_buffer = esp_hal_smartled::smart_led_buffer!(2);
+    let mut led = {
+        let frequency = Rate::from_mhz(80);
+        let rmt = Rmt::new(peripherals.RMT, frequency).expect("Failed to initialize RMT0");
+        SmartLedsAdapter::new(rmt.channel0, peripherals.GPIO2, &mut led_buffer)
+    };
+    let level = 100;
+    led.write(brightness([RED].into_iter(), level)).unwrap();
+    info!("LED abstraction layer is initialized sucessfully.");
 
     // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
     let radio_init = &*mk_static!(
