@@ -58,7 +58,7 @@ macro_rules! mk_static {
 
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
-const N_LEDS: usize = 1;
+const N_LEDS: usize = 8;
 
 #[derive(defmt::Format, Copy, Clone, Debug)]
 #[repr(u8)]
@@ -85,7 +85,7 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 98767);
 
-    let mut delay = Delay::new();
+    let delay = Delay::new();
 
     let mut led_buffer = esp_hal_smartled::smart_led_buffer!(N_LEDS);
     let mut led = {
@@ -98,21 +98,25 @@ async fn main(spawner: Spawner) -> ! {
     let level = 20;
 
     let mut i: u8 = 0;
+    let mut colors = [smart_leds::colors::RED; N_LEDS];
+    led.write(brightness(colors.into_iter(), level)).unwrap();
+
+    delay.delay_millis(1000);
     loop {
         if i >= 255 {
             i = 0;
         }
         i += 1;
 
-        let colors = RGB8 {
-            r: i,
-            g: i,
-            b: 255 - i,
-        };
-        if let Err(e) = led.write(brightness([colors].into_iter(), level)) {
-            info!("LED write failed: ");
+        for j in 0..N_LEDS {
+            colors[j] = RGB8 {
+                r: i,
+                g: 0,
+                b: 255 - i,
+            };
         }
-        delay.delay_millis(100);
+        led.write(brightness(colors.into_iter(), level)).unwrap();
+        delay.delay_millis(50);
     }
 }
 
