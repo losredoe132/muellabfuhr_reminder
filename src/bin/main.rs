@@ -20,6 +20,7 @@ use embassy_net::{
 };
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
+use esp_hal::peripherals::{self, Peripherals};
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::{self as _, println};
@@ -27,9 +28,9 @@ use esp_radio::wifi::{
     ClientConfig, ModeConfig, ScanConfig, WifiController, WifiDevice, WifiEvent, WifiStaState,
 };
 
-use esp_hal::{ rmt::Rmt, time::Rate};
+use esp_hal::{rmt::Rmt, time::Rate};
 use esp_hal_smartled::SmartLedsAdapter;
-use smart_leds::{SmartLedsWrite as _, brightness, colors::RED};
+use smart_leds::{SmartLedsWrite as _, brightness, colors::ORANGE};
 
 use reqwless::client::{HttpClient, TlsConfig};
 use smoltcp::storage::PacketMetadata;
@@ -181,16 +182,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     info!("Embassy initialized!");
-
-    let mut led_buffer = esp_hal_smartled::smart_led_buffer!(2);
-    let mut led = {
-        let frequency = Rate::from_mhz(80);
-        let rmt = Rmt::new(peripherals.RMT, frequency).expect("Failed to initialize RMT0");
-        SmartLedsAdapter::new(rmt.channel0, peripherals.GPIO2, &mut led_buffer)
-    };
-    let level = 100;
-    led.write(brightness([RED].into_iter(), level)).unwrap();
-    info!("LED abstraction layer is initialized sucessfully.");
+    init_led_hal(peripherals.GPIO2, peripherals.RMT);
 
     // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
     let radio_init = &*mk_static!(
@@ -218,7 +210,6 @@ async fn main(spawner: Spawner) -> ! {
         mk_static!(StackResources<3>, StackResources::<3>::new()),
         net_seed,
     );
-
     spawner.spawn(connection(wifi_controller)).ok();
     spawner.spawn(net_task(runner)).ok();
 
@@ -287,6 +278,18 @@ async fn wait_for_connection(stack: Stack<'_>) {
         }
         Timer::after(Duration::from_millis(500)).await;
     }
+}
+
+fn init_led_hal(gpio2: peripherals::GPIO2<'static>, rmt: peripherals::RMT<'static>) {
+    let mut led_buffer = esp_hal_smartled::smart_led_buffer!(8);
+    let mut led = {
+        let frequency = Rate::from_mhz(80);
+        let rmt = Rmt::new(rmt, frequency).expect("Failed to initialize RMT0");
+        SmartLedsAdapter::new(rmt.channel0, gpio2, &mut led_buffer)
+    };
+    info!("LED abstraction layer is initialized sucessfully.");
+    let level = 100;
+    led.write(brightness([ORANGE].into_iter(), level)).unwrap();
 }
 
 #[embassy_executor::task]
