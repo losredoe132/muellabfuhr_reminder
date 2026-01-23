@@ -21,19 +21,13 @@ use embassy_net::{
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::peripherals::{self, Peripherals};
-use esp_hal::rng::Rng;
-use esp_hal::timer::timg::TimerGroup;
 use esp_println::{self as _, println};
-use esp_radio::wifi::{
-    ClientConfig, ModeConfig, ScanConfig, WifiController, WifiDevice, WifiEvent, WifiStaState,
-};
 
+use esp_hal::delay::Delay;
 use esp_hal::{rmt::Rmt, time::Rate};
 use esp_hal_smartled::SmartLedsAdapter;
-use smart_leds::{SmartLedsWrite as _, brightness, colors::ORANGE};
-
-use reqwless::client::{HttpClient, TlsConfig};
-use smoltcp::storage::PacketMetadata;
+use smart_leds::RGB8;
+use smart_leds::{SmartLedsWrite as _, brightness, colors};
 use time::{Date, Month, UtcDateTime};
 
 #[panic_handler]
@@ -64,6 +58,7 @@ macro_rules! mk_static {
 
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
+const N_LEDS: usize = 1;
 
 #[derive(defmt::Format, Copy, Clone, Debug)]
 #[repr(u8)]
@@ -81,94 +76,6 @@ struct IcsEvent {
     event_type: Option<Event>,
 }
 
-fn parse_yyyymmdd(s: &str) -> Result<Date, &'static str> {
-    if s.len() != 8 {
-        return Err("Expected 8 characters (YYYYMMDD)");
-    }
-
-    let year = s[0..4].parse::<i32>().map_err(|_| "Invalid year")?;
-    let month_num = s[4..6].parse::<u8>().map_err(|_| "Invalid month")?;
-    let day = s[6..8].parse::<u8>().map_err(|_| "Invalid day")?;
-
-    let month = Month::try_from(month_num).expect("month must be in 1..=12");
-
-    Date::from_calendar_date(year, month, day).map_err(|_| "Invalid date")
-}
-
-fn extract_ics_event(ics_document: String) -> Vec<IcsEvent> {
-    let mut ics_events: Vec<IcsEvent> = Vec::new();
-    let mut event_type: Option<Event> = None;
-    let mut start_ts: Option<Date> = None;
-
-    for line_str in ics_document.lines() {
-        let line = line_str.trim_end();
-
-        if line.starts_with("DTSTART;") {
-            assert!(line.starts_with("DTSTART;TZID=Europe/Berlin;VALUE=DATE:"),);
-            assert!(line.len() == 46, "Line length: {}", line.len());
-            start_ts = Some(parse_yyyymmdd(&line[38..]).unwrap());
-        } else if line.starts_with("SUMMARY:") {
-            let event_name = line[8..].trim();
-            match event_name {
-                "Abfuhr gelbe Wertstofftonne/-sack" => {
-                    event_type = Some(Event::Verpackungs);
-                }
-                "Abfuhr grüne Biotonne" => {
-                    event_type = Some(Event::Bio);
-                }
-                "Abfuhr blaue Papiertonne" => {
-                    event_type = Some(Event::Papier);
-                }
-                "Abfuhr schwarze Restmülltonne" => {
-                    event_type = Some(Event::Restmüll);
-                }
-                "Abfuhr Laubsäcke" => {
-                    event_type = Some(Event::Laubsack);
-                }
-                "Abfuhr Weihnachtsbäume" => {
-                    event_type = Some(Event::Weihnachtsbäume);
-                }
-                _ => {
-                    println!("Unknown Event: {}", line); // Placeholder
-                }
-            }
-        } else if line == "END:VEVENT" {
-            assert!(start_ts.is_some());
-            assert!(event_type.is_some());
-            //println!("{:?} @ {:?}", event_type.unwrap(), start_ts.unwrap());
-            ics_events.push(IcsEvent {
-                dtstart: start_ts,
-                event_type: event_type,
-            });
-        }
-    }
-    return ics_events;
-}
-
-pub async fn ntp_request(socket: &mut UdpSocket<'_>) -> Result<i64, ()> {
-    let mut request = [0u8; 48];
-    request[0] = 0x23; // LI=0, VN=4, Mode=3 (client)
-
-    let endpoint = IpEndpoint::new(NTP_SERVER.into(), NTP_PORT);
-
-    socket.send_to(&request, endpoint).await.map_err(|_| ())?;
-
-    let mut response = [0u8; 48];
-
-    // Optional timeout
-    Timer::after(Duration::from_secs(5)).await;
-
-    let (_len, _src) = socket.recv_from(&mut response).await.map_err(|_| ())?;
-
-    // Transmit Timestamp starts at byte 40
-    let seconds =
-        u32::from_be_bytes([response[40], response[41], response[42], response[43]]) as u64;
-
-    let unix_time = seconds.checked_sub(NTP_UNIX_OFFSET).ok_or(())?;
-
-    Ok(unix_time as i64)
-}
-
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.0.0
@@ -178,87 +85,35 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 98767);
 
-    let timg0 = TimerGroup::new(peripherals.TIMG0);
-    esp_rtos::start(timg0.timer0);
+    let mut delay = Delay::new();
 
-    info!("Embassy initialized!");
-    init_led_hal(peripherals.GPIO2, peripherals.RMT);
+    let mut led_buffer = esp_hal_smartled::smart_led_buffer!(N_LEDS);
+    let mut led = {
+        let frequency = Rate::from_mhz(80);
+        let rmt = Rmt::new(peripherals.RMT, frequency).expect("Failed to initialize RMT0");
+        SmartLedsAdapter::new(rmt.channel0, peripherals.GPIO13, &mut led_buffer)
+    };
+    info!("LED abstraction layer is initialized sucessfully.");
 
-    // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
-    let radio_init = &*mk_static!(
-        esp_radio::Controller<'static>,
-        esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
-    );
+    let level = 20;
 
-    let (wifi_controller, interfaces) =
-        esp_radio::wifi::new(&radio_init, peripherals.WIFI, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
-
-    let wifi_interface = interfaces.sta;
-
-    let rng = Rng::new();
-    let net_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
-    let tls_seed = rng.random() as u64 | ((rng.random() as u64) << 32);
-
-    let dhcp_config = DhcpConfig::default();
-    let config = embassy_net::Config::dhcpv4(dhcp_config);
-
-    // Init network stack
-    let (stack, runner) = embassy_net::new(
-        wifi_interface,
-        config,
-        mk_static!(StackResources<3>, StackResources::<3>::new()),
-        net_seed,
-    );
-    spawner.spawn(connection(wifi_controller)).ok();
-    spawner.spawn(net_task(runner)).ok();
-
-    wait_for_connection(stack).await;
-
-    let s: String = get_ics(stack, tls_seed).await;
-    let events = extract_ics_event(s);
-    info!("Extracted {} events", events.len());
-
-    //How many packets can be buffered
-    const RX_PACKET_COUNT: usize = 1;
-    const TX_PACKET_COUNT: usize = 1;
-
-    // Metadata (packet descriptors)
-    let mut rx_meta = [PacketMetadata::<UdpMetadata>::EMPTY; RX_PACKET_COUNT];
-    let mut tx_meta = [PacketMetadata::<UdpMetadata>::EMPTY; TX_PACKET_COUNT];
-
-    // Payload buffers
-    let mut rx_buf = [0u8; 256];
-    let mut tx_buf = [0u8; 256];
-
-    let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buf, &mut tx_meta, &mut tx_buf);
-    socket.bind(0).unwrap(); // random local port
-
-    let unix_time = ntp_request(&mut socket).await.unwrap();
-    info!("Got Unix timestamp: {}", unix_time);
-    let today = UtcDateTime::from_unix_timestamp(unix_time).unwrap().date();
-    info!(
-        "Converted Unix timestamp to Date: {}-{}-{}",
-        today.day() as u16,
-        today.month() as u16,
-        today.year() as u16
-    );
-
-    for event in events {
-        info!(
-            "checking {} at {}-{}-{} ",
-            event.event_type,
-            event.dtstart.unwrap().day() as u16,
-            event.dtstart.unwrap().month() as u16,
-            event.dtstart.unwrap().year() as u16,
-        );
-
-        if today.next_day().eq(&event.dtstart) {
-            info!("Tomorrow is {}", event.event_type)
+    let mut i: u8 = 0;
+    loop {
+        if i >= 255 {
+            i = 0;
         }
-    }
+        i += 1;
 
-    loop {}
+        let colors = RGB8 {
+            r: i,
+            g: i,
+            b: 255 - i,
+        };
+        if let Err(e) = led.write(brightness([colors].into_iter(), level)) {
+            info!("LED write failed: ");
+        }
+        delay.delay_millis(100);
+    }
 }
 
 async fn wait_for_connection(stack: Stack<'_>) {
@@ -278,102 +133,4 @@ async fn wait_for_connection(stack: Stack<'_>) {
         }
         Timer::after(Duration::from_millis(500)).await;
     }
-}
-
-fn init_led_hal(gpio2: peripherals::GPIO2<'static>, rmt: peripherals::RMT<'static>) {
-    let mut led_buffer = esp_hal_smartled::smart_led_buffer!(8);
-    let mut led = {
-        let frequency = Rate::from_mhz(80);
-        let rmt = Rmt::new(rmt, frequency).expect("Failed to initialize RMT0");
-        SmartLedsAdapter::new(rmt.channel0, gpio2, &mut led_buffer)
-    };
-    info!("LED abstraction layer is initialized sucessfully.");
-    let level = 100;
-    led.write(brightness([ORANGE].into_iter(), level)).unwrap();
-}
-
-#[embassy_executor::task]
-async fn connection(mut controller: WifiController<'static>) {
-    println!("start connection task");
-    println!("Device capabilities: {:?}", controller.capabilities());
-    loop {
-        match esp_radio::wifi::sta_state() {
-            WifiStaState::Connected => {
-                // wait until we're no longer connected
-                controller.wait_for_event(WifiEvent::StaDisconnected).await;
-                Timer::after(Duration::from_millis(5000)).await
-            }
-            _ => {}
-        }
-        if !matches!(controller.is_started(), Ok(true)) {
-            let client_config = ModeConfig::Client(
-                ClientConfig::default()
-                    .with_ssid(SSID.into())
-                    .with_password(PASSWORD.into()),
-            );
-            controller.set_config(&client_config).unwrap();
-            println!("Starting wifi");
-            controller.start_async().await.unwrap();
-            println!("Wifi started!");
-
-            println!("Scan");
-            let scan_config = ScanConfig::default().with_max(10);
-            let result = controller
-                .scan_with_config_async(scan_config)
-                .await
-                .unwrap();
-            for ap in result {
-                println!("{:?}", ap);
-            }
-        }
-        println!("About to connect...");
-
-        match controller.connect_async().await {
-            Ok(_) => println!("Wifi connected!"),
-            Err(e) => {
-                println!("Failed to connect to wifi: {:?}", e);
-                Timer::after(Duration::from_millis(5000)).await
-            }
-        }
-    }
-}
-
-#[embassy_executor::task]
-async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
-    runner.run().await
-}
-
-async fn get_ics(stack: Stack<'_>, tls_seed: u64) -> String {
-    let mut rx_buffer = [0; RX_BUFFER_SIZE];
-    let mut tx_buffer = [0; 4096];
-    let dns = DnsSocket::new(stack);
-    let tcp_state = TcpClientState::<1, 4096, RX_BUFFER_SIZE>::new();
-    let tcp = TcpClient::new(stack, &tcp_state);
-
-    let tls = TlsConfig::new(
-        tls_seed,
-        &mut rx_buffer,
-        &mut tx_buffer,
-        reqwless::client::TlsVerify::None,
-    );
-
-    let mut client = HttpClient::new_with_tls(&tcp, &dns, tls);
-    let mut buffer = [0u8; RX_BUFFER_SIZE];
-    let mut http_req = client
-        .request(
-            reqwless::request::Method::GET,
-            "https://backend.stadtreinigung.hamburg/kalender/abholtermine.ics?hnIds=44353",
-        )
-        .await
-        .unwrap();
-    info!("requesting");
-    let response = http_req.send(&mut buffer).await.unwrap();
-
-    info!("Got response");
-    let res = response.body().read_to_end().await.unwrap();
-
-    let content = core::str::from_utf8(res).unwrap();
-    let mut s = String::new();
-    s.push_str(content);
-    return s;
 }
